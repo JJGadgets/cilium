@@ -1,0 +1,91 @@
+name: Test GKE cluster action
+
+on:
+  push:
+    branches:
+      - pr/artyop/gke-cluster-creation-action
+  pull_request:
+
+# By specifying the access of one of the scopes, all of those that are not
+# specified are set to 'none'.
+permissions:
+  # To read actions state with catchpoint/workflow-telemetry-action
+  actions: read
+  # To be able to access the repository with actions/checkout
+  contents: read
+  # To allow retrieving information from the PR API
+  pull-requests: read
+  # To be able to set commit status
+  statuses: write
+  # To be able to request the JWT from GitHub's OIDC provider
+  id-token: write
+
+env:
+  clusterName: test-arty
+  gcloud_version: 533.0.0
+
+jobs:
+  create-both:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - cluster_number: 1
+            zone: us-central1-a
+            cluster_version: "1.32.6-gke.1060000"
+            mode: ""                 
+            nodes: 2
+            machine_type: "e2-custom-2-4096"
+
+          - cluster_number: 2
+            zone: us-central1-a
+            cluster_version: ""          
+            mode: "baseline"
+            nodes: 2
+            machine_type: "n2-standard-2"
+
+    steps:
+      - name: Checkout context ref 
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Set up gcloud credentials
+        id: 'auth'
+        uses: google-github-actions/auth@b7593ed2efd1c1617e1b0254da33b86225adb2a5 # v2.1.12
+        with:
+          workload_identity_provider: ${{ secrets.GCP_PR_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_PR_SA }}
+          create_credentials_file: true
+          export_environment_variables: true
+
+      - name: Set up gcloud CLI
+        uses: google-github-actions/setup-gcloud@cb1e50a9932213ecece00a606661ae9ca44f3397 # v2.2.0
+        with:
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
+          version: ${{ env.gcloud_version }}
+
+      - name: Create GKE cluster ${{ env.clusterName }}-${{ matrix.cluster_number }}
+        id: setup-gke-cluster
+        uses: ./.github/actions/setup-gke-cluster
+        with:
+          cluster-name: ${{ env.clusterName }}-${{ matrix.cluster_number }}
+          zone: ${{ matrix.zone }}
+          cluster-version: ${{ matrix.cluster_version }}
+          mode: ${{ matrix.mode }}
+          nodes: ${{ matrix.nodes }}
+          machine-type: ${{ matrix.machine_type }}
+          labels: "usage=${{ github.event.repository.name }}"
+
+      - name: Show native CIDR for ${{ env.clusterName }}-${{ matrix.cluster_number }}
+        run: echo "${{ env.clusterName }}-${{ matrix.cluster_number }} CIDR = ${{ steps.create.outputs.native_cidr }}"
+
+      - name: Clean up GKE clusters
+        if: ${{ always() }}
+        run: |
+          while [ "$(gcloud container operations list --zone ${{ matrix.zone }} --filter="status=RUNNING AND targetLink~${{ env.clusterName }}-${{ matrix.cluster_number }}" --format="value(name)")" ];do
+            echo "cluster has an ongoing operation, waiting for all operations to finish"; sleep 15
+          done
+          gcloud container clusters delete ${{ env.clusterName }}-${{ matrix.cluster_number }} --zone ${{ matrix.zone }} --quiet --async
+        shell: bash {0} # Disable default fail-fast behavior so that all commands run independently
